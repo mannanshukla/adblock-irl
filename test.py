@@ -1,48 +1,55 @@
 import cv2
 from ultralytics import YOLO
 
-# Load the tiny pretrained YOLOv8 model
-model = YOLO('yolov8n.pt')
+# —— 1) Load your local billboard detector checkpoint ——
+model = YOLO("yolo11l.pt")
 
-# Open your Mac’s default webcam (device index 0)
+# —— 2) Open your camera (swap 0→1→2… until you hit the right device) ——
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    raise RuntimeError('Cannot open webcam')
+    raise RuntimeError("Cannot open camera. Try changing the index in VideoCapture().")
 
-# Size of each pixel block in the mosaic
+# Size of each “pixel block” for the mosaic censor
 pixel_size = 15
 
+# —— 3) Live inference + mosaic censor loop ——
 while True:
     ret, frame = cap.read()
     if not ret:
-        break
+        continue
 
-    # Run inference in streaming mode (one frame at a time)
+    # Run inference; stream=True keeps things hot, conf=0.25 filters low-score boxes
     for result in model(frame, stream=True, conf=0.25):
-        boxes   = result.boxes.xyxy.cpu().numpy().astype(int)
-        classes = result.boxes.cls.cpu().numpy().astype(int)
-        scores  = result.boxes.conf.cpu().numpy()
+        # Extract Nx4 array of xyxy boxes
+        bboxes = result.boxes.xyxy.cpu().numpy().astype(int)
 
-        for (x1, y1, x2, y2), cls, conf in zip(boxes, classes, scores):
-            # If this is a person (class 0), pixelate that region
-            if cls == 0:
-                roi = frame[y1:y2, x1:x2]
-                h, w = roi.shape[:2]
-                # downscale
-                small = cv2.resize(roi, (max(1, w//pixel_size), max(1, h//pixel_size)), interpolation=cv2.INTER_LINEAR)
-                # upscale back to original size using nearest neighbor
-                mosaic = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-                frame[y1:y2, x1:x2] = mosaic
+        # For each detected billboard, apply the blocky mosaic
+        for (x1, y1, x2, y2) in bboxes:
+            # Clamp to valid ROI
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+            roi = frame[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
 
-            # Draw the bounding box and confidence label
-            label = f'{model.names[int(cls)]} {conf:.2f}'
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, label, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Downsample to small “pixel grid”
+            small = cv2.resize(
+                roi,
+                (max(1, (x2 - x1) // pixel_size), max(1, (y2 - y1) // pixel_size)),
+                interpolation=cv2.INTER_LINEAR
+            )
+            # Upsample back to original ROI size using nearest-neighbor
+            mosaic = cv2.resize(
+                small,
+                (x2 - x1, y2 - y1),
+                interpolation=cv2.INTER_NEAREST
+            )
+            # Replace the region in the frame
+            frame[y1:y2, x1:x2] = mosaic
 
-    # Display the pixelated frame
-    cv2.imshow('YOLOv8 Webcam – Cartoon Censor', frame)
-    if cv2.waitKey(1) == 27:  # press ESC to quit
+    # Display the censored feed
+    cv2.imshow("Live Billboard Mosaic Censor", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
